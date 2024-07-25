@@ -1,0 +1,483 @@
+# PIPELINE DEFINITION
+# Name: demo-2-black-friday
+# Inputs:
+#    DATASET_ID: str
+#    PROJECT_ID: str
+#    TABLE_TEST: str
+#    TABLE_TRAIN: str
+# Outputs:
+#    evaluate-model-metrics: system.Metrics
+#    train-model-metrics: system.Metrics
+components:
+  comp-condition-1:
+    dag:
+      tasks:
+        inference:
+          cachingOptions:
+            enableCache: true
+          componentRef:
+            name: comp-inference
+          inputs:
+            artifacts:
+              dataset_test:
+                componentInputArtifact: pipelinechannel--export-datasets-dataset_test
+              model:
+                componentInputArtifact: pipelinechannel--train-model-model
+          taskInfo:
+            name: inference
+    inputDefinitions:
+      artifacts:
+        pipelinechannel--export-datasets-dataset_test:
+          artifactType:
+            schemaTitle: system.Dataset
+            schemaVersion: 0.0.1
+        pipelinechannel--train-model-model:
+          artifactType:
+            schemaTitle: system.Model
+            schemaVersion: 0.0.1
+      parameters:
+        pipelinechannel--evaluate-model-r2:
+          parameterType: NUMBER_DOUBLE
+  comp-evaluate-model:
+    executorLabel: exec-evaluate-model
+    inputDefinitions:
+      artifacts:
+        dataset_test:
+          artifactType:
+            schemaTitle: system.Dataset
+            schemaVersion: 0.0.1
+          description: The testing dataset.
+        model:
+          artifactType:
+            schemaTitle: system.Model
+            schemaVersion: 0.0.1
+          description: The trained model.
+    outputDefinitions:
+      artifacts:
+        metrics:
+          artifactType:
+            schemaTitle: system.Metrics
+            schemaVersion: 0.0.1
+          description: The evaluation metrics of the model.
+      parameters:
+        r2:
+          description: The R2 score of the model.
+          parameterType: NUMBER_DOUBLE
+        rmse:
+          description: The RMSE of the model.
+          parameterType: NUMBER_DOUBLE
+  comp-export-datasets:
+    executorLabel: exec-export-datasets
+    inputDefinitions:
+      parameters:
+        dataset_id:
+          description: The BigQuery Dataset ID. Must be pre-created in the project.
+          parameterType: STRING
+        project_id:
+          description: The Project ID.
+          parameterType: STRING
+        table_test:
+          description: The BigQuery test table name.
+          parameterType: STRING
+        table_train:
+          description: The BigQuery train table name.
+          parameterType: STRING
+    outputDefinitions:
+      artifacts:
+        dataset_test:
+          artifactType:
+            schemaTitle: system.Dataset
+            schemaVersion: 0.0.1
+          description: The Dataset artifact with exported CSV file.
+        dataset_train:
+          artifactType:
+            schemaTitle: system.Dataset
+            schemaVersion: 0.0.1
+          description: The Dataset artifact with exported CSV file.
+  comp-inference:
+    executorLabel: exec-inference
+    inputDefinitions:
+      artifacts:
+        dataset_test:
+          artifactType:
+            schemaTitle: system.Dataset
+            schemaVersion: 0.0.1
+          description: The testing dataset.
+        model:
+          artifactType:
+            schemaTitle: system.Model
+            schemaVersion: 0.0.1
+          description: The trained model.
+    outputDefinitions:
+      artifacts:
+        predictions:
+          artifactType:
+            schemaTitle: system.Dataset
+            schemaVersion: 0.0.1
+          description: The dataset with predictions.
+  comp-train-model:
+    executorLabel: exec-train-model
+    inputDefinitions:
+      artifacts:
+        dataset_train:
+          artifactType:
+            schemaTitle: system.Dataset
+            schemaVersion: 0.0.1
+          description: The training dataset.
+    outputDefinitions:
+      artifacts:
+        metrics:
+          artifactType:
+            schemaTitle: system.Metrics
+            schemaVersion: 0.0.1
+          description: The metrics of the trained model.
+        model:
+          artifactType:
+            schemaTitle: system.Model
+            schemaVersion: 0.0.1
+          description: The model artifact stores the model.joblib file.
+deploymentSpec:
+  executors:
+    exec-evaluate-model:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - evaluate_model
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'kfp==2.5.0'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"'  &&\
+          \  python3 -m pip install --quiet --no-warn-script-location 'pandas==2.2.2'\
+          \ 'scikit-learn==1.4.2' 'joblib==1.2.0' 'xgboost==2.0.3' && \"$0\" \"$@\"\
+          \n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef evaluate_model(\n    dataset_test: Input[Dataset],\n    model:\
+          \ Input[Model],\n    metrics: Output[Metrics]\n) -> NamedTuple('EvaluationOutput',\
+          \ [('r2', float), ('rmse', float)]):\n    \"\"\"Evaluate the trained model\
+          \ with test data.\n\n    Args:\n        dataset_test: The testing dataset.\n\
+          \        model: The trained model.\n\n    Returns:\n        metrics: The\
+          \ evaluation metrics of the model.\n        r2: The R2 score of the model.\n\
+          \        rmse: The RMSE of the model.\n    \"\"\"\n    import pandas as\
+          \ pd\n    import numpy as np\n    import joblib\n    from sklearn.metrics\
+          \ import r2_score, mean_squared_error\n    from xgboost import XGBRegressor\n\
+          \    try:\n        # Load the test dataset\n        with open(dataset_test.path\
+          \ + '.csv', \"r\") as test_data:\n            test_dataset = pd.read_csv(test_data)\n\
+          \n        X_test = test_dataset.drop(\"Purchase\", axis=1)\n        Y_test\
+          \ = test_dataset[\"Purchase\"]\n\n        # Load the trained model\n   \
+          \     model_file = model.path + \"/model.joblib\"\n        trained_model\
+          \ = joblib.load(model_file)\n\n        # Predict with the model\n      \
+          \  Y_pred = trained_model.predict(X_test)\n\n        # Calculate evaluation\
+          \ metrics\n        r2 = r2_score(Y_test, Y_pred)\n        rmse = np.sqrt(mean_squared_error(Y_test,\
+          \ Y_pred))\n\n        metrics.log_metric(\"RMSE\", round(rmse, 2))\n   \
+          \     metrics.log_metric(\"R2 score\", round(r2, 2))\n\n        print(\"\
+          Evaluation results:\")\n        print(\"RMSE:\", rmse)\n        print(\"\
+          R2 score:\", r2)\n\n        from collections import namedtuple\n       \
+          \ EvaluationOutput = namedtuple('EvaluationOutput', ['r2', 'rmse'])\n  \
+          \      return EvaluationOutput(r2=float(r2), rmse=float(rmse))\n    except\
+          \ Exception as e:\n        print(f\"Error during model evaluation: {str(e)}\"\
+          )\n        raise\n\n"
+        image: python:3.10
+    exec-export-datasets:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - export_datasets
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'kfp==2.5.0'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"'  &&\
+          \  python3 -m pip install --quiet --no-warn-script-location 'google-cloud-bigquery[pandas]==3.15.0'\
+          \ && \"$0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef export_datasets(\n    project_id: str,\n    dataset_id: str,\n\
+          \    table_train: str,\n    table_test: str,\n    dataset_train: Output[Dataset],\n\
+          \    dataset_test: Output[Dataset]\n):\n    \"\"\"\n    Args:\n        project_id:\
+          \ The Project ID.\n        dataset_id: The BigQuery Dataset ID. Must be\
+          \ pre-created in the project.\n        table_train: The BigQuery train table\
+          \ name.\n        table_test: The BigQuery test table name.\n\n    Returns:\n\
+          \        dataset_train: The Dataset artifact with exported CSV file.\n \
+          \       dataset_test: The Dataset artifact with exported CSV file.\n   \
+          \ \"\"\"\n    from google.cloud import bigquery\n    import pandas as pd\n\
+          \    import numpy as np\n\n    client = bigquery.Client(project=project_id)\n\
+          \    table_name = f\"{project_id}.{dataset_id}.{table_train}\"\n    query\
+          \ = \"\"\"\n        SELECT * \n        FROM {table_name}\n    \"\"\".format(\n\
+          \        table_name=table_name\n    )\n    job_config = bigquery.QueryJobConfig()\n\
+          \    query_job = client.query(query=query, job_config=job_config)    \n\
+          \    df_train = query_job.result().to_dataframe()\n\n    table_name = f\"\
+          {project_id}.{dataset_id}.{table_test}\"\n    query = \"\"\"\n        SELECT\
+          \ * \n        FROM {table_name}\n    \"\"\".format(\n        table_name=table_name\n\
+          \    )\n    job_config = bigquery.QueryJobConfig()\n    query_job = client.query(query=query,\
+          \ job_config=job_config)    \n    df_test = query_job.result().to_dataframe()\n\
+          \n    df_train['source'] = 'train'\n    df_test['source'] = 'test'\n\n \
+          \   dataset = pd.concat([df_train, df_test])\n\n    dataset['Age'] = dataset['Age'].apply(lambda\
+          \ x : str(x).replace('55+', '55'))\n    dataset['Stay_In_Current_City_Years']\
+          \ = dataset['Stay_In_Current_City_Years'].apply(lambda x : str(x).replace('4+',\
+          \ '4'))\n    dataset.drop('Product_Category_3', axis = 1, inplace = True)\n\
+          \    dataset.drop('User_ID', axis = 1, inplace = True)\n    dataset.drop('Product_ID',\
+          \ axis = 1, inplace = True)\n    dataset['Product_Category_2'].fillna(dataset['Product_Category_2'].median(),\
+          \ inplace = True)\n    dataset['Stay_In_Current_City_Years'] = dataset['Stay_In_Current_City_Years'].astype('int')\n\
+          \    dataset.drop(['Gender', 'City_Category', 'Marital_Status'], axis =\
+          \ 1, inplace = True)\n\n    train = dataset.loc[dataset['source'] == 'train']\n\
+          \    test = dataset.loc[dataset['source'] == 'test']\n    train.drop('source',\
+          \ axis = 1, inplace = True)\n    test.drop('source', axis = 1, inplace =\
+          \ True)\n\n    train.to_csv(dataset_train.path + '.csv', index=False)\n\
+          \    test.to_csv(dataset_test.path + '.csv', index=False)\n\n"
+        image: python:3.10
+    exec-inference:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - inference
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'kfp==2.5.0'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"'  &&\
+          \  python3 -m pip install --quiet --no-warn-script-location 'pandas==2.2.2'\
+          \ 'scikit-learn==1.4.2' 'xgboost==2.0.3' && \"$0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef inference(\n    dataset_test: Input[Dataset],\n    model: Input[Model],\n\
+          \    predictions: Output[Dataset]\n):\n    \"\"\"Perform inference with\
+          \ the trained model on the test dataset.\n\n    Args:\n        dataset_test:\
+          \ The testing dataset.\n        model: The trained model.\n\n    Returns:\n\
+          \        predictions: The dataset with predictions.\n    \"\"\"\n    import\
+          \ pandas as pd\n    import joblib\n    from xgboost import XGBRegressor\n\
+          \n    # Load the test dataset\n    with open(dataset_test.path + '.csv',\
+          \ \"r\") as test_data:\n        test_dataset = pd.read_csv(test_data)\n\n\
+          \    X_test = test_dataset.drop(\"Purchase\", axis=1)\n\n    # Load the\
+          \ trained model\n    model_file = model.path + \"/model.joblib\"\n    trained_model\
+          \ = joblib.load(model_file)\n\n    # Predict with the model\n    Y_pred\
+          \ = trained_model.predict(X_test)\n\n    # Save predictions to the output\n\
+          \    predictions_df = test_dataset.copy()\n    predictions_df[\"Predicted_Purchase\"\
+          ] = Y_pred\n    predictions_df.to_csv(predictions.path + '.csv', index=False)\n\
+          \n"
+        image: python:3.10
+    exec-train-model:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - train_model
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'kfp==2.5.0'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"'  &&\
+          \  python3 -m pip install --quiet --no-warn-script-location 'pandas==2.2.2'\
+          \ 'scikit-learn==1.4.2' 'scipy==1.13.0' 'xgboost==2.0.3' && \"$0\" \"$@\"\
+          \n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef train_model(\n    dataset_train: Input[Dataset],\n    model:\
+          \ Output[Model],\n    metrics: Output[Metrics],\n):\n    \"\"\"Training\
+          \ XGBoost Regressor model for demo-2-black-friday.\n\n    Args:\n      \
+          \  dataset_train: The training dataset.\n\n    Returns:\n        model:\
+          \ The model artifact stores the model.joblib file.\n        metrics: The\
+          \ metrics of the trained model.\n    \"\"\"\n\n    import pandas as pd\n\
+          \    import numpy as np\n    import time, os, joblib\n    from sklearn.model_selection\
+          \ import RandomizedSearchCV, train_test_split\n    from sklearn.metrics\
+          \ import r2_score, mean_squared_error\n    from sklearn.preprocessing import\
+          \ OrdinalEncoder, StandardScaler\n    from sklearn.compose import ColumnTransformer\n\
+          \    from sklearn.pipeline import Pipeline\n    from xgboost import XGBRegressor\n\
+          \n    with open(dataset_train.path + '.csv', \"r\") as train_data:\n   \
+          \     dataset = pd.read_csv(train_data)\n\n    X = dataset.drop(\"Purchase\"\
+          , axis = 1)\n    Y = dataset[\"Purchase\"]\n\n    X_train, X_test, Y_train,\
+          \ Y_test = train_test_split(X, Y, test_size = 0.2, random_state = 42)\n\n\
+          \    preprocessor = ColumnTransformer(transformers=[\n        ('cat', OrdinalEncoder(),\
+          \ ['Age'])],\n    )\n\n    max_depth = [int(x) for x in np.linspace(start\
+          \ = 5, stop = 20, num = 15)]\n    learning_rate = ['0.01', '0.05', '0.1',\
+          \ '0.25', '0.5', '0.75', '1.0']\n    min_child_weight = [int(x) for x in\
+          \ np.linspace(start = 45, stop = 70, num = 15)]\n\n    params = {\n    \
+          \ \"regressor__learning_rate\"    : learning_rate,\n     \"regressor__max_depth\"\
+          \        : max_depth,\n     \"regressor__min_child_weight\" : min_child_weight,\n\
+          \     \"regressor__gamma\"            : [0.0, 0.1, 0.2 , 0.3, 0.4],\n  \
+          \   \"regressor__colsample_bytree\" : [0.3, 0.4, 0.5 , 0.7]\n    }\n\n \
+          \   xgb = XGBRegressor(verbosity = 0, random_state = 42)\n\n    regr = Pipeline([\n\
+          \        ('preprocessor', preprocessor),\n        ('standard-scaler', StandardScaler()),\n\
+          \        ('regressor', xgb)\n    ])\n\n    xgb_cv = RandomizedSearchCV(regr,\
+          \ param_distributions = params, cv = 5, random_state = 42)\n\n    xgb_cv.fit(X_train,\
+          \ Y_train)\n\n    xgb_best = xgb_cv.best_estimator_\n\n    Y_pred_xgb_best\
+          \ = xgb_best.predict(X_test)\n\n    r2 = r2_score(Y_test, Y_pred_xgb_best)\n\
+          \    rmse = np.sqrt(mean_squared_error(Y_test, Y_pred_xgb_best))\n\n   \
+          \ metrics.log_metric(\"Framework\", \"XGBoost\")\n    metrics.log_metric(\"\
+          Train_samples_size\", len(X_train))\n    metrics.log_metric(\"Validation_samples_size\"\
+          , len(X_test))\n    metrics.log_metric(\"RMSE\", round(rmse,2))\n    metrics.log_metric(\"\
+          R2 score\", round(r2,2))\n\n    print(\"XGB regression:\")\n    print(\"\
+          RMSE:\",rmse)\n    print(\"R2 score:\", r2)\n\n    # Export the model to\
+          \ a file\n    os.makedirs(model.path, exist_ok=True)\n    joblib.dump(xgb_best,\
+          \ os.path.join(model.path, \"model.joblib\"))\n\n"
+        image: python:3.10
+pipelineInfo:
+  name: demo-2-black-friday
+root:
+  dag:
+    outputs:
+      artifacts:
+        evaluate-model-metrics:
+          artifactSelectors:
+          - outputArtifactKey: metrics
+            producerSubtask: evaluate-model
+        train-model-metrics:
+          artifactSelectors:
+          - outputArtifactKey: metrics
+            producerSubtask: train-model
+    tasks:
+      condition-1:
+        componentRef:
+          name: comp-condition-1
+        dependentTasks:
+        - evaluate-model
+        - export-datasets
+        - train-model
+        inputs:
+          artifacts:
+            pipelinechannel--export-datasets-dataset_test:
+              taskOutputArtifact:
+                outputArtifactKey: dataset_test
+                producerTask: export-datasets
+            pipelinechannel--train-model-model:
+              taskOutputArtifact:
+                outputArtifactKey: model
+                producerTask: train-model
+          parameters:
+            pipelinechannel--evaluate-model-r2:
+              taskOutputParameter:
+                outputParameterKey: r2
+                producerTask: evaluate-model
+        taskInfo:
+          name: condition-1
+        triggerPolicy:
+          condition: inputs.parameter_values['pipelinechannel--evaluate-model-r2']
+            < 0.5
+      evaluate-model:
+        cachingOptions:
+          enableCache: true
+        componentRef:
+          name: comp-evaluate-model
+        dependentTasks:
+        - export-datasets
+        - train-model
+        inputs:
+          artifacts:
+            dataset_test:
+              taskOutputArtifact:
+                outputArtifactKey: dataset_train
+                producerTask: export-datasets
+            model:
+              taskOutputArtifact:
+                outputArtifactKey: model
+                producerTask: train-model
+        taskInfo:
+          name: evaluate-model
+      export-datasets:
+        cachingOptions:
+          enableCache: true
+        componentRef:
+          name: comp-export-datasets
+        inputs:
+          parameters:
+            dataset_id:
+              componentInputParameter: DATASET_ID
+            project_id:
+              componentInputParameter: PROJECT_ID
+            table_test:
+              componentInputParameter: TABLE_TEST
+            table_train:
+              componentInputParameter: TABLE_TRAIN
+        taskInfo:
+          name: export-datasets
+      train-model:
+        cachingOptions:
+          enableCache: true
+        componentRef:
+          name: comp-train-model
+        dependentTasks:
+        - export-datasets
+        inputs:
+          artifacts:
+            dataset_train:
+              taskOutputArtifact:
+                outputArtifactKey: dataset_train
+                producerTask: export-datasets
+        taskInfo:
+          name: train-model
+  inputDefinitions:
+    parameters:
+      DATASET_ID:
+        parameterType: STRING
+      PROJECT_ID:
+        parameterType: STRING
+      TABLE_TEST:
+        parameterType: STRING
+      TABLE_TRAIN:
+        parameterType: STRING
+  outputDefinitions:
+    artifacts:
+      evaluate-model-metrics:
+        artifactType:
+          schemaTitle: system.Metrics
+          schemaVersion: 0.0.1
+        description: The evaluation metrics of the model.
+      train-model-metrics:
+        artifactType:
+          schemaTitle: system.Metrics
+          schemaVersion: 0.0.1
+        description: The metrics of the trained model.
+schemaVersion: 2.1.0
+sdkVersion: kfp-2.5.0
