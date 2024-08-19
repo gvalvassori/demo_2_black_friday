@@ -9,6 +9,60 @@
 #    evaluate-model-metrics: system.Metrics
 #    train-model-metrics: system.Metrics
 components:
+  comp-condition-1:
+    dag:
+      tasks:
+        deploy-model-to-endpoint:
+          cachingOptions:
+            enableCache: true
+          componentRef:
+            name: comp-deploy-model-to-endpoint
+          inputs:
+            artifacts:
+              model:
+                componentInputArtifact: pipelinechannel--train-model-model
+            parameters:
+              endpoint_display_name:
+                runtimeValue:
+                  constant: demo-2-black-friday-endpoint
+              location:
+                runtimeValue:
+                  constant: us-central1
+              model_display_name:
+                runtimeValue:
+                  constant: demo-2-black-friday
+              project:
+                componentInputParameter: pipelinechannel--PROJECT_ID
+          taskInfo:
+            name: deploy-model-to-endpoint
+        inference:
+          cachingOptions:
+            enableCache: true
+          componentRef:
+            name: comp-inference
+          inputs:
+            artifacts:
+              dataset_test:
+                componentInputArtifact: pipelinechannel--export-datasets-dataset_test
+              model:
+                componentInputArtifact: pipelinechannel--train-model-model
+          taskInfo:
+            name: inference
+    inputDefinitions:
+      artifacts:
+        pipelinechannel--export-datasets-dataset_test:
+          artifactType:
+            schemaTitle: system.Dataset
+            schemaVersion: 0.0.1
+        pipelinechannel--train-model-model:
+          artifactType:
+            schemaTitle: system.Model
+            schemaVersion: 0.0.1
+      parameters:
+        pipelinechannel--PROJECT_ID:
+          parameterType: STRING
+        pipelinechannel--evaluate-model-r2:
+          parameterType: NUMBER_DOUBLE
   comp-deploy-model-to-endpoint:
     executorLabel: exec-deploy-model-to-endpoint
     inputDefinitions:
@@ -94,6 +148,27 @@ components:
             schemaTitle: system.Dataset
             schemaVersion: 0.0.1
           description: The Dataset artifact with exported CSV file.
+  comp-inference:
+    executorLabel: exec-inference
+    inputDefinitions:
+      artifacts:
+        dataset_test:
+          artifactType:
+            schemaTitle: system.Dataset
+            schemaVersion: 0.0.1
+          description: The testing dataset.
+        model:
+          artifactType:
+            schemaTitle: system.Model
+            schemaVersion: 0.0.1
+          description: The trained model.
+    outputDefinitions:
+      artifacts:
+        predictions:
+          artifactType:
+            schemaTitle: system.Dataset
+            schemaVersion: 0.0.1
+          description: The dataset with predictions.
   comp-train-model:
     executorLabel: exec-train-model
     inputDefinitions:
@@ -286,6 +361,52 @@ deploymentSpec:
           \ True)\n\n    train.to_csv(dataset_train.path + '.csv', index=False)\n\
           \    test.to_csv(dataset_test.path + '.csv', index=False)\n\n"
         image: python:3.10
+    exec-inference:
+      container:
+        args:
+        - --executor_input
+        - '{{$}}'
+        - --function_to_execute
+        - inference
+        command:
+        - sh
+        - -c
+        - "\nif ! [ -x \"$(command -v pip)\" ]; then\n    python3 -m ensurepip ||\
+          \ python3 -m ensurepip --user || apt-get install python3-pip\nfi\n\nPIP_DISABLE_PIP_VERSION_CHECK=1\
+          \ python3 -m pip install --quiet --no-warn-script-location 'kfp==2.5.0'\
+          \ '--no-deps' 'typing-extensions>=3.7.4,<5; python_version<\"3.9\"'  &&\
+          \  python3 -m pip install --quiet --no-warn-script-location 'pandas==2.2.2'\
+          \ 'scikit-learn==1.4.2' 'xgboost==1.7.6' 'numpy==1.26.4' 'joblib==1.3.2'\
+          \ && \"$0\" \"$@\"\n"
+        - sh
+        - -ec
+        - 'program_path=$(mktemp -d)
+
+
+          printf "%s" "$0" > "$program_path/ephemeral_component.py"
+
+          _KFP_RUNTIME=true python3 -m kfp.dsl.executor_main                         --component_module_path                         "$program_path/ephemeral_component.py"                         "$@"
+
+          '
+        - "\nimport kfp\nfrom kfp import dsl\nfrom kfp.dsl import *\nfrom typing import\
+          \ *\n\ndef inference(\n    dataset_test: Input[Dataset],\n    model: Input[Model],\n\
+          \    predictions: Output[Dataset]\n):\n    \"\"\"Perform inference with\
+          \ the trained model on the test dataset.\n\n    Args:\n        dataset_test:\
+          \ The testing dataset.\n        model: The trained model.\n\n    Returns:\n\
+          \        predictions: The dataset with predictions.\n    \"\"\"\n    import\
+          \ pandas as pd\n    import pickle\n    from xgboost import XGBRegressor\n\
+          \n    # Load the test dataset\n    with open(dataset_test.path + '.csv',\
+          \ \"r\") as test_data:\n        test_dataset = pd.read_csv(test_data)\n\n\
+          \    X_test = test_dataset.drop(\"Purchase\", axis=1)\n\n    # Load the\
+          \ trained model\n    model_file = model.path + \"/model.pkl\"\n    model_file\
+          \ = model.path + \"/model.pkl\"\n    with open(model_file, 'rb') as f:\n\
+          \        trained_model = pickle.load(f)\n\n    print(f\"Model loaded successfully:\
+          \ {type(trained_model)}\")\n\n    # Predict with the model\n    Y_pred =\
+          \ trained_model.predict(X_test)\n\n    # Save predictions to the output\n\
+          \    predictions_df = test_dataset.copy()\n    predictions_df[\"Predicted_Purchase\"\
+          ] = Y_pred\n    predictions_df.to_csv(predictions.path + '.csv', index=False)\n\
+          \n"
+        image: python:3.10
     exec-train-model:
       container:
         args:
@@ -369,33 +490,35 @@ root:
           - outputArtifactKey: metrics
             producerSubtask: train-model
     tasks:
-      deploy-model-to-endpoint:
-        cachingOptions:
-          enableCache: true
+      condition-1:
         componentRef:
-          name: comp-deploy-model-to-endpoint
+          name: comp-condition-1
         dependentTasks:
+        - evaluate-model
+        - export-datasets
         - train-model
         inputs:
           artifacts:
-            model:
+            pipelinechannel--export-datasets-dataset_test:
+              taskOutputArtifact:
+                outputArtifactKey: dataset_test
+                producerTask: export-datasets
+            pipelinechannel--train-model-model:
               taskOutputArtifact:
                 outputArtifactKey: model
                 producerTask: train-model
           parameters:
-            endpoint_display_name:
-              runtimeValue:
-                constant: demo-2-black-friday-endpoint
-            location:
-              runtimeValue:
-                constant: us-central1
-            model_display_name:
-              runtimeValue:
-                constant: demo-2-black-friday
-            project:
+            pipelinechannel--PROJECT_ID:
               componentInputParameter: PROJECT_ID
+            pipelinechannel--evaluate-model-r2:
+              taskOutputParameter:
+                outputParameterKey: r2
+                producerTask: evaluate-model
         taskInfo:
-          name: deploy-model-to-endpoint
+          name: condition-1
+        triggerPolicy:
+          condition: inputs.parameter_values['pipelinechannel--evaluate-model-r2']
+            < 0.5
       evaluate-model:
         cachingOptions:
           enableCache: true
