@@ -25,3 +25,12 @@ En este repositorio podrán observar el contenido de los archivos utilizados par
 + **cloudbuild.yaml:** El archivo cloudbuild.yaml es un archivo de configuración de compilación que contiene instrucciones para Cloud Build. Este flujo de trabajo de construcción automatiza la configuración del entorno Python, la instalación de dependencias y la ejecución de scripts principales (main_df.py y main_sp.py).
 
 + **requirements.txt:** define las dependencias necesarias para ejecutar correctamente el archivo main_df.py.
+
+
+## Code origin certification
+
+Todos los códigos utilizados fuero desarrollados por CoreBI S.A., la parte de MLOps fue desarrollada haciendo uso de la documentación oficial de Kubeflow y su adaptación de Google
+
+* [Build a pipeline](https://cloud.google.com/vertex-ai/docs/pipelines/build-pipeline)
+
+Todos los componentes utilizados son open source.
